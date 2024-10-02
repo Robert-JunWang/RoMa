@@ -1,3 +1,6 @@
+import ssl
+ssl._create_default_https_context = ssl._create_unverified_context
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -17,8 +20,10 @@ import wandb
 from PIL import Image
 from torchvision.transforms import ToTensor
 
-from roma.benchmarks import MegadepthDenseBenchmark, ScanNetBenchmark
-from roma.benchmarks import Mega1500PoseLibBenchmark, ScanNetPoselibBenchmark
+from roma.benchmarks import MegadepthDenseBenchmark
+from roma.benchmarks import Mega1500PoseLibBenchmark
+
+#from roma.benchmarks import ScanNetBenchmark, ScanNetPoselibBenchmark
 from roma.datasets.megadepth import MegadepthBuilder
 from roma.losses.robust_loss_tiny_roma import RobustLosses
 from roma.benchmarks import MegaDepthPoseEstimationBenchmark, MegadepthDenseBenchmark, HpatchesHomogBenchmark

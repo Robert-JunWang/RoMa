@@ -1,3 +1,6 @@
+import ssl
+ssl._create_default_https_context = ssl._create_unverified_context
+
 import os
 import torch
 from argparse import ArgumentParser
@@ -36,12 +39,12 @@ def test_mega_8_scenes(model, name):
     json.dump(mega_8_scenes_results, open(f"results/mega_8_scenes_{name}.json", "w"))
 
 def test_mega1500(model, name):
-    mega1500_benchmark = MegaDepthPoseEstimationBenchmark("data/megadepth")
+    mega1500_benchmark = MegaDepthPoseEstimationBenchmark("data/megadepth/test")
     mega1500_results = mega1500_benchmark.benchmark(model, model_name=name)
     json.dump(mega1500_results, open(f"results/mega1500_{name}.json", "w"))
 
 def test_mega1500_poselib(model, name):
-    mega1500_benchmark = Mega1500PoseLibBenchmark("data/megadepth")
+    mega1500_benchmark = Mega1500PoseLibBenchmark("data/megadepth/test")
     mega1500_results = mega1500_benchmark.benchmark(model, model_name=name)
     json.dump(mega1500_results, open(f"results/mega1500_{name}.json", "w"))
 
