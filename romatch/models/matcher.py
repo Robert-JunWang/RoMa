@@ -9,12 +9,10 @@ import warnings
 from warnings import warn
 from PIL import Image
 
-import roma
-from roma.utils import get_tuple_transform_ops
-from roma.utils.local_correlation import local_correlation
-from roma.utils.utils import cls_to_flow_refine
-from roma.utils.kde import kde
-from typing import Union
+from romatch.utils import get_tuple_transform_ops
+from romatch.utils.local_correlation import local_correlation
+from romatch.utils.utils import cls_to_flow_refine, get_autocast_params
+from romatch.utils.kde import kde
 
 class ConvRefiner(nn.Module):
     def __init__(
@@ -106,15 +104,15 @@ class ConvRefiner(nn.Module):
         
     def forward(self, x, y, flow, scale_factor = 1, logits = None):
         b,c,hs,ws = x.shape
-        with torch.autocast("cuda", enabled=self.amp, dtype = self.amp_dtype):
-            with torch.no_grad():
-                x_hat = F.grid_sample(y, flow.permute(0, 2, 3, 1), align_corners=False, mode = self.sample_mode)
+        autocast_device, autocast_enabled, autocast_dtype = get_autocast_params(x.device, enabled=self.amp, dtype=self.amp_dtype)
+        with torch.autocast(autocast_device, enabled=autocast_enabled, dtype = autocast_dtype):            
+            x_hat = F.grid_sample(y, flow.permute(0, 2, 3, 1), align_corners=False, mode = self.sample_mode)
             if self.has_displacement_emb:
                 im_A_coords = torch.meshgrid(
                 (
                     torch.linspace(-1 + 1 / hs, 1 - 1 / hs, hs, device=x.device),
                     torch.linspace(-1 + 1 / ws, 1 - 1 / ws, ws, device=x.device),
-                )
+                ), indexing='ij'
                 )
                 im_A_coords = torch.stack((im_A_coords[1], im_A_coords[0]))
                 im_A_coords = im_A_coords[None].expand(b, 2, hs, ws)
@@ -198,14 +196,14 @@ class GP(nn.Module):
         cov = F.pad(cov, 4 * (K // 2,))  # pad v_q
         delta = torch.stack(
             torch.meshgrid(
-                torch.arange(-(K // 2), K // 2 + 1), torch.arange(-(K // 2), K // 2 + 1)
-            ),
+                torch.arange(-(K // 2), K // 2 + 1), torch.arange(-(K // 2), K // 2 + 1),
+                indexing = 'ij'),
             dim=-1,
         )
         positions = torch.stack(
             torch.meshgrid(
-                torch.arange(K // 2, h + K // 2), torch.arange(K // 2, w + K // 2)
-            ),
+                torch.arange(K // 2, h + K // 2), torch.arange(K // 2, w + K // 2),
+                indexing = 'ij'),
             dim=-1,
         )
         neighbours = positions[:, :, None, None, :] + delta[None, :, :]
@@ -237,7 +235,8 @@ class GP(nn.Module):
             (
                 torch.linspace(-1 + 1 / h, 1 - 1 / h, h, device=y.device),
                 torch.linspace(-1 + 1 / w, 1 - 1 / w, w, device=y.device),
-            )
+            ),
+            indexing = 'ij'
         )
 
         coarse_coords = torch.stack((coarse_coords[1], coarse_coords[0]), dim=-1)[
@@ -306,7 +305,8 @@ class Decoder(nn.Module):
             (
                 torch.linspace(-1 + 1 / h, 1 - 1 / h, h, device=device),
                 torch.linspace(-1 + 1 / w, 1 - 1 / w, w, device=device),
-            )
+            ),
+            indexing = 'ij'
         )
         coarse_coords = torch.stack((coarse_coords[1], coarse_coords[0]), dim=-1)[
             None
@@ -319,7 +319,8 @@ class Decoder(nn.Module):
             (
                 torch.linspace(-1 + 1 / h, 1 - 1 / h, h, device=device),
                 torch.linspace(-1 + 1 / w, 1 - 1 / w, w, device=device),
-            )
+            ),
+            indexing = 'ij'
         )
 
         coarse_coords = torch.stack((coarse_coords[1], coarse_coords[0]), dim=-1)[
@@ -363,7 +364,10 @@ class Decoder(nn.Module):
             corresps[ins] = {}
             f1_s, f2_s = f1[ins], f2[ins]
             if new_scale in self.proj:
-                with torch.autocast("cuda", dtype = self.amp_dtype):
+                autocast_device, autocast_enabled, autocast_dtype = get_autocast_params(f1_s.device, str(f1_s)=='cuda', self.amp_dtype)
+                with torch.autocast(autocast_device, enabled=autocast_enabled, dtype = autocast_dtype):
+                    if not autocast_enabled:
+                        f1_s, f2_s = f1_s.to(torch.float32), f2_s.to(torch.float32)
                     f1_s, f2_s = self.proj[new_scale](f1_s), self.proj[new_scale](f2_s)
 
             if ins in coarse_scales:
@@ -430,7 +434,6 @@ class RegressionMatcher(nn.Module):
         symmetric = False,
         name = None,
         attenuate_cert = None,
-        recrop_upsample = False,
     ):
         super().__init__()
         self.attenuate_cert = attenuate_cert
@@ -445,7 +448,6 @@ class RegressionMatcher(nn.Module):
         self.upsample_res = (14*16*6, 14*16*6)
         self.symmetric = symmetric
         self.sample_thresh = 0.05
-        self.recrop_upsample = recrop_upsample
             
     def get_output_resolution(self):
         if not self.upsample_preds:
@@ -587,32 +589,12 @@ class RegressionMatcher(nn.Module):
                 return torch.cat((inds_A, inds_B),dim=-1)
             else:
                 return torch.cat((x_A[inds_A], x_B[inds_B]),dim=-1)
-    
-    def get_roi(self, certainty, W, H, thr = 0.025):
-        raise NotImplementedError("WIP, disable for now")
-        hs,ws = certainty.shape
-        certainty = certainty/certainty.sum(dim=(-1,-2))
-        cum_certainty_w = certainty.cumsum(dim=-1).sum(dim=-2)
-        cum_certainty_h = certainty.cumsum(dim=-2).sum(dim=-1)
-        print(cum_certainty_w)
-        print(torch.min(torch.nonzero(cum_certainty_w > thr)))
-        print(torch.min(torch.nonzero(cum_certainty_w < thr)))
-        left = int(W/ws * torch.min(torch.nonzero(cum_certainty_w > thr)))
-        right = int(W/ws * torch.max(torch.nonzero(cum_certainty_w < 1 - thr)))
-        top = int(H/hs * torch.min(torch.nonzero(cum_certainty_h > thr)))
-        bottom = int(H/hs * torch.max(torch.nonzero(cum_certainty_h < 1 - thr)))
-        print(left, right, top, bottom)
-        return left, top, right, bottom
-
-    def recrop(self, certainty, image_path):
-        roi = self.get_roi(certainty, *Image.open(image_path).size)
-        return Image.open(image_path).convert("RGB").crop(roi)
-        
+            
     @torch.inference_mode()
     def match(
         self,
-        im_A_path: Union[str, os.PathLike, Image.Image],
-        im_B_path: Union[str, os.PathLike, Image.Image],
+        im_A_path,
+        im_B_path,
         *args,
         batched=False,
         device = None,
@@ -672,14 +654,7 @@ class RegressionMatcher(nn.Module):
                 test_transform = get_tuple_transform_ops(
                     resize=(hs, ws), normalize=True
                 )
-                if self.recrop_upsample:
-                    raise NotImplementedError("recrop_upsample not implemented")
-                    certainty = corresps[finest_scale]["certainty"]
-                    print(certainty.shape)
-                    im_A = self.recrop(certainty[0,0], im_A_path)
-                    im_B = self.recrop(certainty[1,0], im_B_path)
-                    #TODO: need to adjust corresps when doing this
-                im_A, im_B = test_transform((im_A, im_B))
+                im_A, im_B = test_transform((Image.open(im_A_path).convert('RGB'), Image.open(im_B_path).convert('RGB')))
                 im_A, im_B = im_A[None].to(device), im_B[None].to(device)
                 scale_factor = math.sqrt(self.upsample_res[0] * self.upsample_res[1] / (self.w_resized * self.h_resized))
                 batch = {"im_A": im_A, "im_B": im_B, "corresps": finest_corresps}
@@ -705,7 +680,8 @@ class RegressionMatcher(nn.Module):
                 (
                     torch.linspace(-1 + 1 / hs, 1 - 1 / hs, hs, device=device),
                     torch.linspace(-1 + 1 / ws, 1 - 1 / ws, ws, device=device),
-                )
+                ),
+                indexing = 'ij'
             )
             im_A_coords = torch.stack((im_A_coords[1], im_A_coords[0]))
             im_A_coords = im_A_coords[None].expand(b, 2, hs, ws)
@@ -767,6 +743,6 @@ class RegressionMatcher(nn.Module):
             white_im = torch.ones((H, W), device = device)
         vis_im = certainty * warp_im + (1 - certainty) * white_im
         if save_path is not None:
-            from roma.utils import tensor_to_pil
+            from romatch.utils import tensor_to_pil
             tensor_to_pil(vis_im, unnormalize=unnormalize).save(save_path)
         return vis_im

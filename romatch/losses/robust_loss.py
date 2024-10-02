@@ -2,9 +2,9 @@ from einops.einops import rearrange
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from roma.utils.utils import get_gt_warp
+from romatch.utils.utils import get_gt_warp
 import wandb
-import roma
+import romatch
 import math
 
 class RobustLosses(nn.Module):
@@ -45,7 +45,7 @@ class RobustLosses(nn.Module):
             B, C, H, W = scale_gm_cls.shape
             device = x2.device
             cls_res = round(math.sqrt(C))
-            G = torch.meshgrid(*[torch.linspace(-1+1/cls_res, 1 - 1/cls_res, steps = cls_res,device = device) for _ in range(2)])
+            G = torch.meshgrid(*[torch.linspace(-1+1/cls_res, 1 - 1/cls_res, steps = cls_res,device = device) for _ in range(2)], indexing='ij')
             G = torch.stack((G[1], G[0]), dim = -1).reshape(C,2)
             GT = (G[None,:,None,None,:]-x2[:,None]).norm(dim=-1).min(dim=1).indices
         cls_loss = F.cross_entropy(scale_gm_cls, GT, reduction  = 'none')[prob > 0.99]
@@ -57,7 +57,7 @@ class RobustLosses(nn.Module):
             f"gm_certainty_loss_{scale}": certainty_loss.mean(),
             f"gm_cls_loss_{scale}": cls_loss.mean(),
         }
-        wandb.log(losses, step = roma.GLOBAL_STEP)
+        wandb.log(losses, step = romatch.GLOBAL_STEP)
         return losses
 
     def delta_cls_loss(self, x2, prob, flow_pre_delta, delta_cls, certainty, scale, offset_scale):
@@ -69,21 +69,21 @@ class RobustLosses(nn.Module):
             G = torch.stack((G[1], G[0]), dim = -1).reshape(C,2) * offset_scale
             GT = (G[None,:,None,None,:] + flow_pre_delta[:,None] - x2[:,None]).norm(dim=-1).min(dim=1).indices
         cls_loss = F.cross_entropy(delta_cls, GT, reduction  = 'none')[prob > 0.99]
+        certainty_loss = F.binary_cross_entropy_with_logits(certainty[:,0], prob)
         if not torch.any(cls_loss):
             cls_loss = (certainty_loss * 0.0)  # Prevent issues where prob is 0 everywhere
-        certainty_loss = F.binary_cross_entropy_with_logits(certainty[:,0], prob)
         losses = {
             f"delta_certainty_loss_{scale}": certainty_loss.mean(),
             f"delta_cls_loss_{scale}": cls_loss.mean(),
         }
-        wandb.log(losses, step = roma.GLOBAL_STEP)
+        wandb.log(losses, step = romatch.GLOBAL_STEP)
         return losses
 
     def regression_loss(self, x2, prob, flow, certainty, scale, eps=1e-8, mode = "delta"):
         epe = (flow.permute(0,2,3,1) - x2).norm(dim=-1)
         if scale == 1:
             pck_05 = (epe[prob > 0.99] < 0.5 * (2/512)).float().mean()
-            wandb.log({"train_pck_05": pck_05}, step = roma.GLOBAL_STEP)
+            wandb.log({"train_pck_05": pck_05}, step = romatch.GLOBAL_STEP)
 
         ce_loss = F.binary_cross_entropy_with_logits(certainty[:, 0], prob)
         a = self.alpha[scale] if isinstance(self.alpha, dict) else self.alpha
@@ -96,7 +96,7 @@ class RobustLosses(nn.Module):
             f"{mode}_certainty_loss_{scale}": ce_loss.mean(),
             f"{mode}_regression_loss_{scale}": reg_loss.mean(),
         }
-        wandb.log(losses, step = roma.GLOBAL_STEP)
+        wandb.log(losses, step = romatch.GLOBAL_STEP)
         return losses
 
     def forward(self, corresps, batch):

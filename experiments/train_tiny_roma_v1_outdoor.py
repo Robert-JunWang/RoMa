@@ -158,7 +158,7 @@ class XFeatModel(nn.Module):
                     indexing = "xy"), 
                 dim = -1).float().to(corr_volume).reshape(H1*W1 //down**2, 2)
             cv = corr_volume
-            best_match = cv.reshape(B,H1*W1,H0,W0).argmax(dim=1) # B, HW, H, W
+            best_match = cv.reshape(B,H1*W1,H0,W0).amax(dim=1) # B, HW, H, W
             P_lowres = torch.cat((cv[:,::down,::down].reshape(B,H1*W1 // down**2,H0,W0), best_match[:,None]),dim=1).softmax(dim=1)
             pos_embeddings = torch.einsum('bchw,cd->bdhw', P_lowres[:,:-1], grid_lr)
             pos_embeddings += P_lowres[:,-1] * grid[best_match].permute(0,3,1,2)
@@ -199,7 +199,7 @@ class XFeatModel(nn.Module):
             white_im = torch.ones((H, W), device = device)
         vis_im = certainty * warp_im + (1 - certainty) * white_im
         if save_path is not None:
-            from roma.utils import tensor_to_pil
+            from romatch.utils import tensor_to_pil
             tensor_to_pil(vis_im, unnormalize=unnormalize).save(save_path)
         return vis_im
      
@@ -335,14 +335,14 @@ def train(args):
     rank = 0
     gpus = 1
     device_id = rank % torch.cuda.device_count()
-    roma.LOCAL_RANK = 0
+    romatch.LOCAL_RANK = 0
     torch.cuda.set_device(device_id)
         
     resolution = "big"
     wandb_log = not args.dont_log_wandb
     experiment_name = Path(__file__).stem
     wandb_mode = "online" if wandb_log and rank == 0 else "disabled"
-    wandb.init(project="roma", entity=args.wandb_entity, name=experiment_name, reinit=False, mode = wandb_mode)
+    wandb.init(project="romatch", entity=args.wandb_entity, name=experiment_name, reinit=False, mode = wandb_mode)
     checkpoint_dir = "workspace/checkpoints/"
     h,w = resolutions[resolution]
     model = XFeatModel(freeze_xfeat = False).to(device_id)
@@ -350,11 +350,11 @@ def train(args):
     global_step = 0
     batch_size = args.gpu_batch_size
     step_size = gpus*batch_size
-    roma.STEP_SIZE = step_size
+    romatch.STEP_SIZE = step_size
     
     N = 2_000_000  # 2M pairs
     # checkpoint every
-    k = 25000 // roma.STEP_SIZE
+    k = 25000 // romatch.STEP_SIZE
 
     # Data
     mega = MegadepthBuilder(data_root="data/megadepth", loftr_ignore=True, imc21_ignore = True)
@@ -382,21 +382,21 @@ def train(args):
         epe_mask_prob_th = 0.001,
         )
     parameters = [
-        {"params": model.parameters(), "lr": roma.STEP_SIZE * 1e-4 / 8},
+        {"params": model.parameters(), "lr": romatch.STEP_SIZE * 1e-4 / 8},
     ]
     optimizer = torch.optim.AdamW(parameters, weight_decay=0.01)
     lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(
-        optimizer, milestones=[(9*N/roma.STEP_SIZE)//10])
+        optimizer, milestones=[(9*N/romatch.STEP_SIZE)//10])
     #megadense_benchmark = MegadepthDenseBenchmark("data/megadepth", num_samples = 1000, h=h,w=w)
     mega1500_benchmark = Mega1500PoseLibBenchmark("data/megadepth", num_ransac_iter = 1, test_every = 30)
 
     checkpointer = CheckPoint(checkpoint_dir, experiment_name)
     model, optimizer, lr_scheduler, global_step = checkpointer.load(model, optimizer, lr_scheduler, global_step)
-    roma.GLOBAL_STEP = global_step
+    romatch.GLOBAL_STEP = global_step
     grad_scaler = torch.cuda.amp.GradScaler(growth_interval=1_000_000)
     grad_clip_norm = 0.01
     #megadense_benchmark.benchmark(model)
-    for n in range(roma.GLOBAL_STEP, N, k * roma.STEP_SIZE):
+    for n in range(romatch.GLOBAL_STEP, N, k * romatch.STEP_SIZE):
         mega_sampler = torch.utils.data.WeightedRandomSampler(
             mega_ws, num_samples = batch_size * k, replacement=False
         )
@@ -411,8 +411,8 @@ def train(args):
         train_k_steps(
             n, k, mega_dataloader, model, depth_loss, optimizer, lr_scheduler, grad_scaler, grad_clip_norm = grad_clip_norm,
         )
-        checkpointer.save(model, optimizer, lr_scheduler, roma.GLOBAL_STEP)
-        wandb.log(mega1500_benchmark.benchmark(model, model_name=experiment_name), step = roma.GLOBAL_STEP)
+        checkpointer.save(model, optimizer, lr_scheduler, romatch.GLOBAL_STEP)
+        wandb.log(mega1500_benchmark.benchmark(model, model_name=experiment_name), step = romatch.GLOBAL_STEP)
 
 def test_mega_8_scenes(model, name):
     mega_8_scenes_benchmark = MegaDepthPoseEstimationBenchmark("data/megadepth",
@@ -481,7 +481,7 @@ if __name__ == "__main__":
     os.environ["TORCH_CUDNN_V8_API_ENABLED"] = "1" # For BF16 computations
     os.environ["OMP_NUM_THREADS"] = "16"
     torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
-    import roma
+    import romatch
     parser = ArgumentParser()
     parser.add_argument("--only_test", action='store_true')
     parser.add_argument("--debug_mode", action='store_true')
@@ -491,12 +491,12 @@ if __name__ == "__main__":
     parser.add_argument("--wandb_entity", required = False)
 
     args, _ = parser.parse_known_args()
-    roma.DEBUG_MODE = args.debug_mode
+    romatch.DEBUG_MODE = args.debug_mode
     if not args.only_test:
         train(args)
 
     experiment_name = "tiny_roma_v1_outdoor"#Path(__file__).stem
-    device = 'cuda'
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = XFeatModel(freeze_xfeat=False, exact_softmax=False).to(device)
     model.load_state_dict(torch.load(f"{experiment_name}.pth"))
     test_mega1500_poselib(model, experiment_name)

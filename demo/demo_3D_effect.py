@@ -2,12 +2,13 @@ from PIL import Image
 import torch
 import torch.nn.functional as F
 import numpy as np
-from roma.utils.utils import tensor_to_pil
+from romatch.utils.utils import tensor_to_pil
 
-from roma import roma_outdoor
+from romatch import roma_outdoor
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
+if torch.backends.mps.is_available():
+    device = torch.device('mps')
 
 if __name__ == "__main__":
     from argparse import ArgumentParser
